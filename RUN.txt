@@ -1,0 +1,5 @@
+Build outputs of workflow run https://github.com/danieldossiterjunk/llama-cpp-android-engine/actions/runs/43884327497 (attempt 1)
+recipe commit: d2bfadf66f6cb22485f82668050d3dab07030b83
+bundle: LLAMA_CPP_ANDROID_ARM64_ENGINE_001-ci-bundle.tar.gz (20708571 bytes)
+sha256: d92eade44a9c65335bcafc421cb0ad1bd4938bf3f6ab86493dbce1a3f2955473
+This branch only carries outputs; the recipe lives on main.
