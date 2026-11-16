@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
-      contents: read
+      contents: write
       id-token: write
       attestations: write
     steps:
@@ -77,6 +77,13 @@ jobs:
           path: ${{ runner.temp }}/llama-engine/bundle/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish the bundle to branch ci-output/run-<id>-<attempt>
+        if: always()
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/ci_pipeline.sh publish 2>&1 | tee "$RUNNER_TEMP/llama-engine/stage-logs/09-publish.log"
 
       - name: Attest build provenance of the libraries (public repositories)
         if: ${{ success() && !github.event.repository.private }}

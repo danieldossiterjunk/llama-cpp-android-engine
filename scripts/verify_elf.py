@@ -672,6 +672,7 @@ def main():
     ap.add_argument("--min-sdk", type=int, required=True, help="the project's build.min_sdk")
     ap.add_argument("--system-libs", help="directory of NDK system stub libraries for one API level")
     ap.add_argument("--api-names", help="file with one function name per line that must be exported")
+    ap.add_argument("--api-exceptions", help="file of declared names that upstream never defines (reported, not required)")
     ap.add_argument("--require-jni", action="store_true", help="fail unless some library exports a JNI entry")
     ap.add_argument("--json", help="write the full report as JSON")
     ap.add_argument("--markdown", help="write a Markdown summary")
@@ -754,7 +755,13 @@ def main():
     if a.api_names:
         with open(a.api_names, "r", encoding="utf-8") as f:
             wanted = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+        exceptions = []
+        if a.api_exceptions:
+            with open(a.api_exceptions, "r", encoding="utf-8") as f:
+                exceptions = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
         all_exp = set().union(*exports.values()) if exports else set()
+        exc_exported = sorted(n for n in exceptions if n in all_exp)
+        wanted = [n for n in wanted if n not in exceptions]
         missing = sorted(n for n in wanted if n not in all_exp)
         where = {}
         for n in wanted:
@@ -762,12 +769,18 @@ def main():
                 if n in exports.get(lib, ()):
                     where[lib] = where.get(lib, 0) + 1
                     break
-        api_result = dict(declared=len(wanted), missing=missing, provided_by=where)
+        api_result = dict(declared=len(wanted) + len(exceptions), required=len(wanted), missing=missing,
+                          provided_by=where, upstream_undefined=exceptions,
+                          upstream_undefined_but_exported=exc_exported)
         bundle_checks.add("HEADER_FUNCTIONS_EXPORTED", "PASS" if not missing else "FAIL",
                           "%d of %d header-declared functions exported (%s)" %
                           (len(wanted) - len(missing), len(wanted),
                            ", ".join("%s: %d" % kv for kv in sorted(where.items())))
                           if not missing else "missing %d: %s" % (len(missing), missing[:20]))
+        if exceptions:
+            bundle_checks.add("HEADER_DECLARED_NEVER_DEFINED_UPSTREAM", "INFO",
+                              "%d declared in upstream headers but defined nowhere in upstream source, so not "
+                              "exported; do not call: %s" % (len(exceptions), ", ".join(exceptions)), required=False)
 
     jni_libs = sorted(r["file"] for r in results if r.get("jni_entries"))
     if a.require_jni:

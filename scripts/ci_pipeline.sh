@@ -11,6 +11,7 @@
 #   finalize   strip, collect headers, verify against APK Builder 004 rules,
 #              link tests, Java check, licences, build information
 #   seal       copy the stage logs into the bundle and write SHA256SUMS.txt
+#   publish    (GitHub only) push the sealed bundle to branch ci-output/run-<id>-<attempt>
 #
 # Works on GitHub's ubuntu-24.04 runner and on any Linux x86_64 machine with an
 # Android SDK (ANDROID_HOME) that has cmdline-tools/latest/bin/sdkmanager.
@@ -117,6 +118,7 @@ stage_toolchain() {
     # The Android SDK licence must be accepted to install SDK packages (upstream's CI does the same).
     (yes 2>/dev/null | "$SDKM" --licenses) > "$L/sdkmanager-licences.log" 2>&1 || true
     "$SDKM" --install "ndk;$NDK_VERSION" "cmake;$SDK_CMAKE_VERSION" "platforms;$JAVA_CHECK_PLATFORM" \
+        "build-tools;$SDK_BUILD_TOOLS_VERSION" \
         > "$L/sdkmanager-install.log" 2>&1 || { tail -50 "$L/sdkmanager-install.log"; die "sdkmanager install failed"; }
     tail -5 "$L/sdkmanager-install.log"
     "$SDKM" --list_installed > "$P/sdk-list-installed.txt" 2>&1 || true
@@ -130,6 +132,8 @@ stage_toolchain() {
     [ -x "$TC/bin/clang" ] && [ -x "$CMB/cmake" ] && [ -x "$CMB/ninja" ] || die "toolchain binaries missing"
     local SYSLIB="$TC/sysroot/usr/lib/aarch64-linux-android"
     [ -f "$SDK/platforms/$JAVA_CHECK_PLATFORM/android.jar" ] || die "android.jar for $JAVA_CHECK_PLATFORM missing"
+    local LAMBDA_STUBS="$SDK/build-tools/$SDK_BUILD_TOOLS_VERSION/core-lambda-stubs.jar"
+    [ -f "$LAMBDA_STUBS" ] || die "core-lambda-stubs.jar missing from build-tools $SDK_BUILD_TOOLS_VERSION"
     {
         echo "android_sdk: $SDK"
         echo "ndk_dir: $NDK"
@@ -147,7 +151,7 @@ stage_toolchain() {
                  "$SYSLIB/libc++_static.a" "$SYSLIB/libc++abi.a" \
                  "$SYSLIB/$ANDROID_API/libc.so" "$SYSLIB/$ANDROID_API/libm.so" "$SYSLIB/$ANDROID_API/libdl.so" \
                  "$SYSLIB/$ANDROID_API/liblog.so" "$SYSLIB/$ANDROID_API/crtbegin_so.o" "$SYSLIB/$ANDROID_API/crtend_so.o" \
-                 "$CMB/cmake" "$CMB/ninja" "$SDK/platforms/$JAVA_CHECK_PLATFORM/android.jar"; do
+                 "$CMB/cmake" "$CMB/ninja" "$SDK/platforms/$JAVA_CHECK_PLATFORM/android.jar" "$LAMBDA_STUBS"; do
             if [ -f "$f" ]; then sha256sum "$f"; else echo "(not present) $f"; fi
         done
         echo "--- libunwind archives in the toolchain"
@@ -160,6 +164,7 @@ stage_toolchain() {
     put_state TC "$TC"
     put_state CMB "$CMB"
     put_state SYSLIB "$SYSLIB"
+    put_state LAMBDA_STUBS "$LAMBDA_STUBS"
     note "toolchain OK"
 }
 
@@ -178,29 +183,45 @@ stage_build() {
 
 stage_compare() {
     load_state
-    local E="$BUNDLE/evidence"
-    mkdir -p "$E"
-    local all_same=1 lib ha hb
+    local E="$BUNDLE/evidence" R="$WORK/repro"
+    rm -rf "$R" "$E/repro-b"
+    mkdir -p "$E" "$R/a" "$R/b"
+    local lib same_unstripped=1 same_stripped=1
     {
         echo "Reproducibility: two clean builds of the same commit with the same toolchain,"
         echo "in different directories:"
         echo "  A: $SRC_A"
         echo "  B: $SRC_B"
         echo
-        for lib in $ENGINE_LIBS; do
-            ha="$(sha256sum "$LIBDIR_A/$lib" | cut -d' ' -f1)"
-            hb="$(sha256sum "$LIBDIR_B/$lib" | cut -d' ' -f1)"
-            if [ "$ha" = "$hb" ]; then
-                echo "IDENTICAL  $lib  $ha"
-            else
-                all_same=0
-                echo "DIFFERENT  $lib  A=$ha  B=$hb  ($(cmp -l "$LIBDIR_A/$lib" "$LIBDIR_B/$lib" 2>/dev/null | wc -l) bytes differ)"
-            fi
-        done
-        echo
-        if [ "$all_same" = 1 ]; then echo "RESULT: REPRODUCIBLE (bit-identical)"; else echo "RESULT: NOT REPRODUCIBLE"; fi
-    } | tee "$E/reproducibility.txt"
-    if [ "$all_same" = 1 ]; then put_state REPRO "REPRODUCIBLE"; else put_state REPRO "NOT_REPRODUCIBLE"; fi
+        echo "== unstripped libraries (with debug information)"
+    } > "$E/reproducibility.txt"
+    for lib in $ENGINE_LIBS; do
+        python3 -I "$HERE/elf_diff.py" "$LIBDIR_A/$lib" "$LIBDIR_B/$lib" >> "$E/reproducibility.txt" || same_unstripped=0
+        "$TC/bin/llvm-strip" --strip-unneeded -o "$R/a/$lib" "$LIBDIR_A/$lib"
+        "$TC/bin/llvm-strip" --strip-unneeded -o "$R/b/$lib" "$LIBDIR_B/$lib"
+    done
+    echo >> "$E/reproducibility.txt"
+    echo "== stripped libraries (what goes into the APK)" >> "$E/reproducibility.txt"
+    for lib in $ENGINE_LIBS; do
+        python3 -I "$HERE/elf_diff.py" "$R/a/$lib" "$R/b/$lib" >> "$E/reproducibility.txt" || same_stripped=0
+    done
+    echo >> "$E/reproducibility.txt"
+    if [ "$same_unstripped" = 1 ]; then
+        echo "RESULT: REPRODUCIBLE (unstripped and stripped libraries bit-identical)" >> "$E/reproducibility.txt"
+        put_state REPRO "REPRODUCIBLE"
+    elif [ "$same_stripped" = 1 ]; then
+        echo "RESULT: STRIPPED REPRODUCIBLE (APK libraries bit-identical; debug information differs)" >> "$E/reproducibility.txt"
+        put_state REPRO "STRIPPED_REPRODUCIBLE"
+    else
+        echo "RESULT: NOT REPRODUCIBLE" >> "$E/reproducibility.txt"
+        put_state REPRO "NOT_REPRODUCIBLE"
+    fi
+    if [ "$same_unstripped" != 1 ]; then
+        mkdir -p "$E/repro-b"
+        for lib in $ENGINE_LIBS; do cp "$LIBDIR_B/$lib" "$E/repro-b/$lib"; done
+        echo "(build B's unstripped libraries are kept in evidence/repro-b/ for comparison)" >> "$E/reproducibility.txt"
+    fi
+    cat "$E/reproducibility.txt"
 }
 
 stage_finalize() {
@@ -227,12 +248,14 @@ stage_finalize() {
     note "header-declared C API"
     local hdrs=()
     for h in $C_API_HEADERS; do hdrs+=("$B/include/$h"); done
-    python3 -I "$HERE/header_api.py" --out-names "$E/header-api-functions.txt" --out-c "$LT/apkb_header_refs.c" "${hdrs[@]}"
+    python3 -I "$HERE/header_api.py" --out-names "$E/header-api-functions.txt" --out-c "$LT/apkb_header_refs.c" \
+        --src "$SRC_A" --out-undefined "$E/header-api-declared-never-defined-upstream.txt" "${hdrs[@]}"
     cp "$LT/apkb_header_refs.c" "$E/link-tests/apkb_header_refs.c"
 
     note "verification against APK Builder 004 rules (API $ANDROID_API system stubs)"
     if python3 -I "$HERE/verify_elf.py" --rules "$RULES" --min-sdk "$ANDROID_API" \
             --system-libs "$SYSLIB/$ANDROID_API" --api-names "$E/header-api-functions.txt" \
+            --api-exceptions "$E/header-api-declared-never-defined-upstream.txt" \
             --json "$E/verify-engine.json" --markdown "$E/verify-engine.md" \
             "$B/jniLibs/$ANDROID_ABI/"*.so > "$E/verify-engine.stdout.txt"; then
         put_state VERIFY_ENGINE PASS
@@ -251,6 +274,13 @@ stage_finalize() {
     else
         put_state VERIFY_DEBUG FAIL
     fi
+
+    for v in verify-engine verify-debug probe-api26; do
+        echo "--- $v: $(grep -m1 -o 'Overall: [A-Z]*' "$E/$v.md" || echo 'no result')"
+        grep -E '\| (FAIL|WARN|NOT TESTED) \|' "$E/$v.md" | cut -c1-600 || true
+    done
+    echo "--- header functions declared but never defined upstream:"
+    grep -v '^#' "$E/header-api-declared-never-defined-upstream.txt" || echo "(none)"
 
     note "raw ELF dumps"
     for lib in $ENGINE_LIBS; do
@@ -296,12 +326,14 @@ stage_finalize() {
         else
             put_state VERIFY_BRIDGE FAIL; fail=1
         fi
+        echo "--- verify-with-selftest-bridge: $(grep -m1 -o 'Overall: [A-Z]*' "$E/verify-with-selftest-bridge.md" || echo 'no result')"
+        grep -E '\| (FAIL|WARN|NOT TESTED) \|' "$E/verify-with-selftest-bridge.md" | cut -c1-600 || true
     fi
 
     note "Java check: the self-test sources at Java 8 level against $JAVA_CHECK_PLATFORM android.jar"
     rm -rf "$LT/classes"; mkdir -p "$LT/classes"
     if javac -source 8 -target 8 -Xlint:all -Xlint:-options -encoding UTF-8 \
-            -bootclasspath "$SDK/platforms/$JAVA_CHECK_PLATFORM/android.jar" -d "$LT/classes" \
+            -bootclasspath "$SDK/platforms/$JAVA_CHECK_PLATFORM/android.jar" -classpath "$LAMBDA_STUBS" -d "$LT/classes" \
             $(find "$REPO_ROOT/selftest/src" -name '*.java' | sort) > "$E/link-tests/javac.log" 2>&1; then
         echo "JAVAC OK" >> "$E/link-tests/javac.log"; put_state JAVAC PASS
     else
@@ -388,7 +420,7 @@ info = {
                 "details": "provenance/toolchain.txt"},
   "target": {"abi": pins["ANDROID_ABI"], "android_platform": pins["ANDROID_API"], "stl": "c++_static (hidden)",
              "cpu_arch": pins["CPU_ARCH"], "page_size_link_flag": "-Wl,-z,max-page-size=16384"},
-  "environment_flags": [l for l in inputs[0].splitlines() if l.startswith(("CFLAGS=","CXXFLAGS=","LDFLAGS=","SOURCE_DATE_EPOCH="))],
+  "extra_flags": [l for l in inputs[0].splitlines() if l.startswith(("PREFIX_MAP=","LINK_FLAGS=","SOURCE_DATE_EPOCH="))],
   "cmake_arguments": [a for a in inputs[1].splitlines() if a] if len(inputs) > 1 else [],
   "cmake_cache": cm,
   "libraries": libs,
@@ -410,6 +442,35 @@ stage_seal() {
     note "sealed $(wc -l < "$BUNDLE/SHA256SUMS.txt") files"
 }
 
+stage_publish() {
+    # GitHub serves workflow artifacts from a storage host that the separate
+    # verification workspace cannot reach, so the sealed bundle is also pushed,
+    # as one tarball, to a per-run branch of this same repository.
+    : "${GITHUB_TOKEN:?GITHUB_TOKEN is needed to publish}"
+    : "${GITHUB_REPOSITORY:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_SHA:?}"
+    local P="$WORK/publish" branch="ci-output/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+    rm -rf "$P"; mkdir -p "$P"
+    tar -C "$WORK/bundle" --sort=name --owner=0 --group=0 --numeric-owner -czf "$P/${PACKAGE_ID}-ci-bundle.tar.gz" "${PACKAGE_ID}-ci"
+    ( cd "$P" && sha256sum "${PACKAGE_ID}-ci-bundle.tar.gz" > "${PACKAGE_ID}-ci-bundle.tar.gz.sha256" )
+    {
+        echo "Build outputs of workflow run ${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (attempt ${GITHUB_RUN_ATTEMPT:-1})"
+        echo "recipe commit: ${GITHUB_SHA}"
+        echo "bundle: ${PACKAGE_ID}-ci-bundle.tar.gz ($(stat -c %s "$P/${PACKAGE_ID}-ci-bundle.tar.gz") bytes)"
+        echo "sha256: $(cut -d' ' -f1 "$P/${PACKAGE_ID}-ci-bundle.tar.gz.sha256")"
+        echo "This branch only carries outputs; the recipe lives on main."
+    } > "$P/RUN.txt"
+    cat "$P/RUN.txt"
+    git -C "$P" init -q -b "$branch"
+    git -C "$P" add -A
+    git -C "$P" -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+        commit -q -m "CI outputs of run ${GITHUB_RUN_ID} (recipe ${GITHUB_SHA})"
+    local auth
+    auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+    git -C "$P" -c http.extraheader="AUTHORIZATION: basic $auth" \
+        push -q -f "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+    note "published to branch $branch"
+}
+
 case "${1:-}" in
     env) stage_env ;;
     fetch) stage_fetch ;;
@@ -419,5 +480,6 @@ case "${1:-}" in
     compare) stage_compare ;;
     finalize) stage_finalize ;;
     seal) stage_seal ;;
-    *) echo "usage: $0 env|fetch|toolchain|build-a|build-b|compare|finalize|seal" >&2; exit 2 ;;
+    publish) stage_publish ;;
+    *) echo "usage: $0 env|fetch|toolchain|build-a|build-b|compare|finalize|seal|publish" >&2; exit 2 ;;
 esac
