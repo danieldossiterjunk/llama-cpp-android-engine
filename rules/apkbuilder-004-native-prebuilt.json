@@ -1,0 +1,138 @@
+{
+  "description": "Extract of APK Builder 0.4.0 environment.json (profile cpp-native-v1): the native-prebuilt rules and SDK limits only. Device and installation details are deliberately left out. Used by scripts/verify_elf.py.",
+  "source": "apk-builder-ai-guide cpp-native-v1 0.4.0, environment.json sha256 0f368d9892c201037e6f431d4d82fc61a6945f340ef9cc30a706131a091f0f47",
+  "builder_version": "0.4.0",
+  "protocol_version": "1.2.0",
+  "sdk_limits": {
+    "compile_api": 29,
+    "min_sdk_minimum": 26,
+    "sdk_maximum": 36
+  },
+  "native_compile": {
+    "c_library": "Android bionic, NDK API 26",
+    "compiler": "Clang 21.1.8 (Termux build)",
+    "flags": "-O2 -fPIC -fstack-protector-strong -Wall"
+  },
+  "native_prebuilt": {
+    "extension": "native-prebuilt",
+    "version": 1,
+    "status": "IMPLEMENTED - DESKTOP VALIDATED; PHONE VALIDATION PENDING",
+    "status_meaning": "Implemented in Build 004 and validated on a desktop: 24 real ARM64 test libraries, hostile inputs and three complete test apps were built, signed and independently verified. No APK built this way has been installed or run on a phone yet, and no real llama.cpp library has been packaged or loaded. Treat every phone result as untested until the owner reports it.",
+    "opt_in": "Add the object native.prebuilt to apkbuilder.json (profile cpp-native-v1 only). Without it this extension does not exist: any .so file in a project is rejected exactly as in Build 003.",
+    "what_it_does": "Copies the declared ARM64 shared libraries into the APK byte for byte (lib/arm64-v8a/, stored uncompressed on 16 KiB boundaries) after checking each one as data. APK Builder never loads or executes them. They run only inside the built app.",
+    "layout": {
+      "jniLibs/arm64-v8a/lib<name>.so": "the prebuilt libraries: only this folder, only files named lib<name>.so (letters, digits, . _ -), no sub-folders, no other ABI",
+      "jni/**": "optional in this mode: C/C++ sources of a JNI bridge that APK Builder compiles and links against the prebuilt libraries; headers of the prebuilt libraries belong here too",
+      "src/**/*.java": "required as always: the Java side that calls System.loadLibrary"
+    },
+    "manifest_template": {
+      "native": {
+        "library_name": "bridge",
+        "prebuilt": {
+          "format": 1,
+          "libraries": [
+            {
+              "file": "libengine.so",
+              "sha256": "<optional: 64 lower-case hex characters; if present the file must match>",
+              "origin": "<where the binary comes from, e.g. the release URL and asset name>",
+              "version": "<release tag or version>",
+              "license": "<SPDX identifier or licence name>"
+            }
+          ]
+        }
+      }
+    },
+    "modes": [
+      "Source bridge + prebuilt engine: jni/ holds a small C or C++ bridge with the JNI functions; native.library_name names it; it is linked against every declared prebuilt library that it actually uses. Java loads only the bridge.",
+      "Prebuilt bridge (+ prebuilt engine): no jni/ sources and no native.library_name; one of the prebuilt libraries exports the JNI functions (Java_<package>_<Class>_<method> or JNI_OnLoad). Java loads that library.",
+      "An engine library alone is rejected (PREBUILT_NO_JNI_ENTRY): a library such as libllama.so has a C API, not JNI functions. It always needs a bridge, compiled here or prebuilt."
+    ],
+    "rules": [
+      "Every .so file under jniLibs/arm64-v8a/ must be listed in native.prebuilt.libraries, and every listed file must be in the ZIP. Nothing is packaged that is not declared.",
+      "Each entry states file, origin, version and license. They are recorded next to the SHA-256 that APK Builder measures; APK Builder does not verify them. sha256 is optional: when given, the file must match it.",
+      "A library's file name must equal its SONAME. Dependencies (DT_NEEDED) are found by SONAME, so do not rename library files.",
+      "Everything a library needs must be: another declared library, libc++_shared.so, or a public Android system library from allowed_system_libraries. Include every companion library of an engine; APK Builder names the missing one.",
+      "libc++_shared.so is owned by APK Builder. A project cannot supply it. When any packaged library needs it, or the project has C++ sources, the pinned copy bundled with the builder is added.",
+      "Load order: Java calls System.loadLibrary once, for the library that has the JNI functions. Android (API 23+) loads its dependencies from the APK by itself, dependencies first; build results list that order as load_order.",
+      "A library built for a newer Android API level than the project's min_sdk fails with UNSUPPORTED_MIN_SDK; raise build.min_sdk (a repair JSON with set_min_sdk can do it).",
+      "Write the Java side so that a failed load is shown, not fatal: catch Throwable around System.loadLibrary and display it. Run native work on a background thread and give it a way to be cancelled.",
+      "Models and other large data files do not belong in the project ZIP. Let the app's user pick them at run time."
+    ],
+    "library_requirements": [
+      "ELF64, little-endian, AArch64 (arm64-v8a), a shared object (not an executable, not a .o or .a file)",
+      "every load segment aligned to 16384 bytes or more, no two load segments in one 16 KiB page, GNU_RELRO not sharing its last 16 KiB page with writable data (link with -Wl,-z,max-page-size=16384)",
+      "a SONAME equal to the file name; DT_NEEDED entries that are plain library names, never paths",
+      "section headers present and consistent with the dynamic segment; a DT_HASH or DT_GNU_HASH table; no text relocations; no segment that is both writable and executable"
+    ],
+    "allowed_system_libraries": {
+      "meaning": "public Android (NDK) libraries a prebuilt library may need, with the Android API level from which each exists",
+      "libraries": {
+        "libEGL.so": 21,
+        "libGLESv1_CM.so": 21,
+        "libGLESv2.so": 21,
+        "libGLESv3.so": 21,
+        "libOpenMAXAL.so": 21,
+        "libOpenSLES.so": 21,
+        "libaaudio.so": 26,
+        "libamidi.so": 29,
+        "libandroid.so": 21,
+        "libbinder_ndk.so": 29,
+        "libc.so": 21,
+        "libcamera2ndk.so": 24,
+        "libdl.so": 21,
+        "libicu.so": 31,
+        "libjnigraphics.so": 21,
+        "liblog.so": 21,
+        "libm.so": 21,
+        "libmediandk.so": 21,
+        "libnativewindow.so": 26,
+        "libneuralnetworks.so": 27,
+        "libstdc++.so": 21,
+        "libsync.so": 26,
+        "libvulkan.so": 24,
+        "libz.so": 21
+      }
+    },
+    "limits": {
+      "max_libraries": 16,
+      "max_library_bytes": 50331648,
+      "max_other_file_bytes": 16777216,
+      "max_total_uncompressed_bytes": 67108864,
+      "max_zip_bytes": 33554432,
+      "note": "Only the per-file limit differs for a prebuilt library; the limits on the whole ZIP are the Build 003 limits, so a project cannot demand more memory or storage than before."
+    },
+    "failure_codes": {
+      "PREBUILT_UNDECLARED_FILE": "a .so file is under jniLibs/arm64-v8a/ but not listed in native.prebuilt.libraries",
+      "PREBUILT_MISSING_FILE": "a library is listed in native.prebuilt.libraries but the file is not in the ZIP",
+      "PREBUILT_HASH_MISMATCH": "the file's SHA-256 differs from the sha256 pinned in apkbuilder.json",
+      "PREBUILT_ELF_INVALID": "the file is not a readable ELF library (truncated, malformed, empty, not ELF at all)",
+      "PREBUILT_WRONG_ABI": "the library is not 64-bit little-endian AArch64 (for example armeabi-v7a, x86 or x86_64)",
+      "PREBUILT_NOT_SHARED_OBJECT": "the file is an executable program or an object file, not a shared library",
+      "PREBUILT_NOT_16K_COMPATIBLE": "the library is not linked for 16 KiB memory pages (load segments, shared pages or GNU_RELRO)",
+      "PREBUILT_LOADER_INCOMPATIBLE": "Android's dynamic linker would refuse the library (text relocations, a writable and executable segment, missing or inconsistent section headers, no symbol hash table)",
+      "PREBUILT_SONAME_MISMATCH": "the library has no SONAME, or its SONAME is not its file name",
+      "PREBUILT_RESERVED_NAME": "the file uses the name of an Android system library",
+      "PREBUILT_DUPLICATE_LIBRARY": "the file has the same name as the library compiled from this project's jni/ sources",
+      "PREBUILT_DEPENDENCY_INVALID": "a DT_NEEDED entry is a path or is unreadable",
+      "PREBUILT_DEPENDENCY_MISSING": "the library needs another library that is neither declared in the project nor a public Android system library",
+      "PREBUILT_DEPENDENCY_CYCLE": "the libraries need each other in a circle",
+      "PREBUILT_LIBCXX_CONFLICT": "the project tries to supply libc++_shared.so, or a library exports its own C++ runtime while libc++_shared.so is also packaged",
+      "PREBUILT_LIBCXX_INCOMPATIBLE": "a library needs C++ runtime symbols that the bundled, pinned libc++_shared.so does not provide",
+      "PREBUILT_NO_JNI_ENTRY": "no jni/ sources and no prebuilt library exports a JNI function, so Java could not call into the libraries",
+      "PREBUILT_API_LEVEL_TOO_NEW": "a library needs a newer Android API level than this builder can target",
+      "PREBUILT_TOO_LARGE": "one library is larger than the per-library limit",
+      "UNSUPPORTED_MIN_SDK": "SETTINGS, repairable by JSON (set_min_sdk): the libraries need a newer Android than the project's min_sdk",
+      "LOW_MEMORY": "DEVICE: not enough free memory to package libraries of this size; nothing in the project is wrong",
+      "ZIP_BOMB": "ARCHIVE: an entry is larger than the per-file limit (48 MiB for a prebuilt library, 16 MiB for anything else) or the archive exceeds its total limits"
+    },
+    "result_record": "A successful build result contains native_prebuilt: each library's name, bytes, SHA-256, declared origin/version/license, SONAME, dependencies and how each was satisfied, load_order, and its position in the APK.",
+    "not_supported": [
+      "any ABI other than arm64-v8a",
+      "static libraries (.a), object files, executables",
+      "a project-supplied libc++_shared.so",
+      "libraries that need non-public platform libraries or vendor libraries (for example libOpenCL.so)",
+      "prebuilt libraries in any profile other than cpp-native-v1",
+      "GPU, Vulkan or NNAPI acceleration has not been evaluated; only CPU libraries are in scope"
+    ]
+  }
+}

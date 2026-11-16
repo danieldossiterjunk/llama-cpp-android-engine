@@ -1,0 +1,119 @@
+name: build-llama-cpp-android-arm64-engine
+
+# Builds LLAMA_CPP_ANDROID_ARM64_ENGINE_001: genuine llama.cpp v1.0.0 engine
+# libraries for Android arm64-v8a with the official Android NDK r29, verified
+# against APK Builder 004's native-prebuilt rules. Every stage is in
+# scripts/ci_pipeline.sh so the same recipe runs outside GitHub too.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  engine:
+    name: llama.cpp v1.0.0 for Android arm64-v8a (NDK 29.0.14206865)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out this build recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare log folder
+        shell: bash
+        run: mkdir -p "$RUNNER_TEMP/llama-engine/stage-logs"
+
+      - name: 01 Record the build machine
+        shell: bash
+        run: bash scripts/ci_pipeline.sh env 2>&1 | tee "$RUNNER_TEMP/llama-engine/stage-logs/01-env.log"
+
+      - name: 02 Verify the upstream v1.0.0 tag and commit, check out twice
+        shell: bash
+        run: bash scripts/ci_pipeline.sh fetch 2>&1 | tee "$RUNNER_TEMP/llama-engine/stage-logs/02-fetch.log"
+
+      - name: 03 Install and verify the official NDK, SDK CMake and android-29 platform
+        shell: bash
+        run: bash scripts/ci_pipeline.sh toolchain 2>&1 | tee "$RUNNER_TEMP/llama-engine/stage-logs/03-toolchain.log"
+
+      - name: 04 Build A
+        shell: bash
+        run: bash scripts/ci_pipeline.sh build-a 2>&1 | tee "$RUNNER_TEMP/llama-engine/stage-logs/04-build-a.log"
+
+      - name: 05 Build B (second clean build, different directory)
+        shell: bash
+        run: bash scripts/ci_pipeline.sh build-b 2>&1 | tee "$RUNNER_TEMP/llama-engine/stage-logs/05-build-b.log"
+
+      - name: 06 Compare the two builds
+        shell: bash
+        run: bash scripts/ci_pipeline.sh compare 2>&1 | tee "$RUNNER_TEMP/llama-engine/stage-logs/06-compare.log"
+
+      - name: 07 Strip, verify against APK Builder 004 rules, link tests, licences
+        shell: bash
+        run: bash scripts/ci_pipeline.sh finalize 2>&1 | tee "$RUNNER_TEMP/llama-engine/stage-logs/07-finalize.log"
+
+      - name: 08 Seal the bundle (stage logs, SHA256SUMS.txt)
+        if: always()
+        shell: bash
+        run: bash scripts/ci_pipeline.sh seal 2>&1 | tee "$RUNNER_TEMP/llama-engine/stage-logs/08-seal.log"
+
+      - name: Upload the bundle
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: LLAMA_CPP_ANDROID_ARM64_ENGINE_001-ci-bundle
+          path: ${{ runner.temp }}/llama-engine/bundle/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attest build provenance of the libraries (public repositories)
+        if: ${{ success() && !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/llama-engine/bundle/LLAMA_CPP_ANDROID_ARM64_ENGINE_001-ci/jniLibs/arm64-v8a/*.so
+            ${{ runner.temp }}/llama-engine/bundle/LLAMA_CPP_ANDROID_ARM64_ENGINE_001-ci/debug/arm64-v8a/*.so
+            ${{ runner.temp }}/llama-engine/bundle/LLAMA_CPP_ANDROID_ARM64_ENGINE_001-ci/SHA256SUMS.txt
+
+  arm64-linux-smoke:
+    name: Same source and CPU flags run on an ARM64 Linux CPU (not Android, not the S25)
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Check out this build recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build llama.cpp v1.0.0 for Linux ARM64 and generate from a tiny test model
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/smoke"
+          bash scripts/arm64_linux_smoke.sh "$RUNNER_TEMP/smoke" 2>&1 | tee "$RUNNER_TEMP/smoke/smoke-console.log"
+
+      - name: Upload the smoke-test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arm64-linux-smoke-evidence
+          path: |
+            ${{ runner.temp }}/smoke/*.log
+            ${{ runner.temp }}/smoke/*.txt
+          if-no-files-found: warn
+          retention-days: 30
